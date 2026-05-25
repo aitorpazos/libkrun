@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate log;
+mod live_vmms;
 
 use crossbeam_channel::unbounded;
 #[cfg(feature = "blk")]
@@ -2629,6 +2630,78 @@ pub unsafe extern "C" fn krun_set_kernel_console(ctx_id: u32, console_id: *const
 
 #[no_mangle]
 #[allow(unreachable_code)]
+#[no_mangle]
+pub extern "C" fn krun_pause_ctx(ctx_id: u32) -> i32 {
+    let live_vmm = match live_vmms::get_live_vmm(ctx_id) {
+        Some(vmm) => vmm,
+        None => return -libc::ENOENT,
+    };
+    let mut vmm_lock = live_vmm.lock().unwrap();
+    vmm_lock.pause_and_wait();
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn krun_resume_ctx(ctx_id: u32) -> i32 {
+    let live_vmm = match live_vmms::get_live_vmm(ctx_id) {
+        Some(vmm) => vmm,
+        None => return -libc::ENOENT,
+    };
+    let mut vmm_lock = live_vmm.lock().unwrap();
+    vmm_lock.resume_all();
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn krun_branch_ctx(parent_ctx_id: u32) -> i32 {
+    let parent_vmm = match live_vmms::get_live_vmm(parent_ctx_id) {
+        Some(vmm) => vmm,
+        None => return -libc::ENOENT,
+    };
+
+    parent_vmm.lock().unwrap().pause_and_wait();
+
+    {
+        let vmm_lock = parent_vmm.lock().unwrap();
+        let vcpu_states: Vec<vmm::linux::vstate::VcpuState> = vmm_lock.save_vcpu_states();
+        let vm_state: vmm::linux::vstate::VmState = vmm_lock.vm.save_state().expect("save VM state");
+        live_vmms::store_vcpu_states(parent_ctx_id, vcpu_states);
+        live_vmms::store_vm_state(parent_ctx_id, vm_state);
+        info!("Saved parent VM state for hot-fork");
+    }
+
+    let memfds = match live_vmms::get_memfds(parent_ctx_id) {
+        Some(mfds) => mfds,
+        None => return -libc::ENOENT,
+    };
+    let mut child_memfds = Vec::new();
+    for rawfd in &memfds {
+        unsafe {
+            let dupfd = libc::dup(*rawfd);
+            if dupfd >= 0 { child_memfds.push(dupfd); }
+        }
+    }
+
+    let child_id = CTX_IDS.fetch_add(1, Ordering::SeqCst) as u32;
+    if child_id == i32::MAX as u32 { return -libc::EBUSY; }
+
+    {
+        let vmr = match live_vmms::get_vmr(parent_ctx_id) {
+            Some(v) => v,
+            None => return -libc::ENOENT,
+        };
+        let mut child_cfg = ContextConfig::default();
+        child_cfg.vmr = vmr;
+        CTX_MAP.lock().unwrap().insert(child_id, child_cfg);
+    }
+
+    live_vmms::store_memfds(child_id, child_memfds);
+    parent_vmm.lock().unwrap().resume_all();
+    child_id as i32
+}
+
+#[no_mangle]
+#[allow(unreachable_code)]
 pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
     #[cfg(target_os = "linux")]
     {
@@ -2796,11 +2869,14 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     let (sender, _receiver) = unbounded();
 
+    let parent_memfds = live_vmms::get_memfds(ctx_id);
+
     let _vmm = match vmm::builder::build_microvm(
         &ctx_cfg.vmr,
         &mut event_manager,
         ctx_cfg.shutdown_efd,
         sender,
+        parent_memfds.as_deref(),
     ) {
         Ok(vmm) => vmm,
         Err(e) => {

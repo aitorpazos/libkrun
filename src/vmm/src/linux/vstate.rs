@@ -894,6 +894,18 @@ impl Vm {
 
 #[allow(unused)]
 #[cfg(target_arch = "x86_64")]
+impl Clone for VmState {
+    fn clone(&self) -> Self {
+        Self {
+            pitstate: self.pitstate.clone(),
+            clock: self.clock.clone(),
+            pic_master: self.pic_master.clone(),
+            pic_slave: self.pic_slave.clone(),
+            ioapic: self.ioapic.clone(),
+        }
+    }
+}
+#[cfg(target_arch = "x86_64")]
 /// Structure holding VM kvm state.
 pub struct VmState {
     pitstate: kvm_pit_state2,
@@ -1624,6 +1636,15 @@ impl Vcpu {
                 // Move to 'exited' state.
                 state = self.exit(FC_EXIT_CODE_GENERIC_ERROR);
             }
+            // SaveState while running - save and stay running
+            Ok(VcpuEvent::SaveState(sender)) => {
+                let state = self.save_state().expect("save_state on running vcpu");
+                sender.send(state).expect("send SavedState");
+            }
+            // RestoreState while running - restore and stay running
+            Ok(VcpuEvent::RestoreState(state)) => {
+                self.restore_state(state).expect("restore_state on running vcpu");
+            }
             // All other events or lack thereof have no effect on current 'running' state.
             Err(TryRecvError::Empty) => (),
         }
@@ -1642,6 +1663,17 @@ impl Vcpu {
                     .expect("failed to send resume status");
                 // Move to 'running' state.
                 StateMachine::next(Self::running)
+            }
+            // SaveState while paused - save and stay paused
+            Ok(VcpuEvent::SaveState(sender)) => {
+                let state = self.save_state().expect("save_state on paused vcpu");
+                sender.send(state).expect("send SavedState");
+                StateMachine::next(Self::paused)
+            }
+            // RestoreState while paused - restore and stay paused
+            Ok(VcpuEvent::RestoreState(state)) => {
+                self.restore_state(state).expect("restore_state on paused vcpu");
+                StateMachine::next(Self::paused)
             }
             // All other events have no effect on current 'paused' state.
             Ok(_) => StateMachine::next(Self::paused),
@@ -1703,6 +1735,24 @@ impl Drop for Vcpu {
 
 #[cfg(target_arch = "x86_64")]
 /// Structure holding VCPU kvm state.
+#[cfg(target_arch = "x86_64")]
+impl Clone for VcpuState {
+    fn clone(&self) -> Self {
+        Self {
+            cpuid: self.cpuid.clone(),
+            msrs: self.msrs.clone(),
+            debug_regs: self.debug_regs.clone(),
+            lapic: self.lapic.clone(),
+            mp_state: self.mp_state.clone(),
+            regs: self.regs.clone(),
+            sregs: self.sregs.clone(),
+            vcpu_events: self.vcpu_events.clone(),
+            xcrs: self.xcrs.clone(),
+            xsave: unsafe { std::ptr::read(std::ptr::addr_of!(self.xsave)) },
+        }
+    }
+}
+#[derive(Debug)]
 pub struct VcpuState {
     cpuid: CpuId,
     msrs: Msrs,
@@ -1725,7 +1775,10 @@ pub enum VcpuEvent {
     Pause,
     /// Event that should resume the Vcpu.
     Resume,
-    // Serialize and Deserialize to follow after we get the support from kvm-ioctls.
+    /// Save vCPU state and send it back via channel.
+    SaveState(crossbeam_channel::Sender<VcpuState>),
+    /// Restore vCPU state from saved snapshot.
+    RestoreState(VcpuState),
 }
 
 #[derive(Debug, Eq, PartialEq)]

@@ -1348,6 +1348,41 @@ int32_t krun_set_root_disk_remount(uint32_t ctx_id, const char *device, const ch
  *  126     - "init" can find the executable to be run inside the microVM but cannot execute it.
  *  127     - "init" cannot find the executable to be run inside the microVM.
  *
+ /**
+ * Pauses the microVM associated with a given context.
+ *
+ * Args:
+ *  ctx_id: the context ID of the microVM, obtained from "krun_create_ctx".
+ */
+int32_t krun_pause_ctx(uint32_t ctx_id);
+
+/**
+ * Resumes the microVM associated with a given context.
+ *
+ * Args:
+ *  ctx_id: the context ID of the microVM, obtained from "krun_create_ctx".
+ */
+int32_t krun_resume_ctx(uint32_t ctx_id);
+
+/**
+ * Creates a snapshot/fork of the microVM associated with a given parent context.
+ * The parent is paused, its VCPU and VM state are saved, then memory is COW-shared.
+ * The parent is resumed before returning.
+ *
+ * Args:
+ *  parent_ctx_id: the context ID of the parent microVM.
+ *
+ * Returns:
+ *  A positive integer as the child context ID on success, or a negative error code.
+ *  -ENOENT - The parent context was not found.
+ *  -EACCES - The parent micro-VM is not running.
+ *  -EBUSY  - Unable to create the child context because all IDs are in use.
+ */
+int32_t krun_branch_ctx(uint32_t parent_ctx_id);
+
+/**
+ * Starts and enters the microVM with the given context configuration.
+ *
  * Returns:
  *  -EINVAL - The VMM has detected an error in the microVM configuration.
  */

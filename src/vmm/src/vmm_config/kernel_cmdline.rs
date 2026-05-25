@@ -12,7 +12,7 @@ pub const DEFAULT_KERNEL_CMDLINE: &str = "reboot=k panic=-1 panic_print=0 nomodu
 
 /// Strongly typed data structure used to configure the boot source of the
 /// microvm.
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct KernelCmdlineConfig {
     pub prolog: Option<String>,
     pub krun_env: Option<String>,

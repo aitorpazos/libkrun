@@ -100,22 +100,26 @@ impl Default for TeeConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct SerialConsoleConfig {
     pub input_fd: RawFd,
     pub output_fd: RawFd,
 }
 
+#[derive(Clone)]
 pub struct DefaultVirtioConsoleConfig {
     pub input_fd: RawFd,
     pub output_fd: RawFd,
     pub err_fd: RawFd,
 }
 
+#[derive(Clone)]
 pub enum VirtioConsoleConfigMode {
     Autoconfigure(DefaultVirtioConsoleConfig),
     Explicit(Vec<PortConfig>),
 }
 
+#[derive(Clone)]
 pub enum PortConfig {
     Tty {
         name: String,
@@ -142,7 +146,7 @@ pub enum VsockConfig {
 
 /// A data structure that encapsulates the device configurations
 /// held in the Vmm.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct VmResources {
     /// The vCpu and memory configuration for this microVM.
     vm_config: VmConfig,

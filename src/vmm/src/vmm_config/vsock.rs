@@ -44,12 +44,13 @@ pub struct VsockDeviceConfig {
     pub tsi_flags: TsiFlags,
 }
 
+#[derive(Clone)]
 struct VsockWrapper {
     vsock: MutexVsock,
 }
 
 /// A builder of Vsock from 'VsockDeviceConfig'.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct VsockBuilder {
     inner: Option<VsockWrapper>,
     tsi_flags: TsiFlags,

@@ -25,7 +25,7 @@ pub mod signal_handler;
 pub mod vmm_config;
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 #[cfg(target_os = "linux")]
 use crate::linux::vstate;
 #[cfg(target_os = "macos")]
@@ -39,6 +39,7 @@ use macos::vstate;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::os::unix::io::AsRawFd;
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
@@ -201,7 +202,7 @@ pub struct Vmm {
 
     vcpus_handles: Vec<VcpuHandle>,
     exit_evt: EventFd,
-    vm: Vm,
+    pub vm: Vm,
     exit_observers: Vec<Arc<Mutex<dyn VmmExitObserver>>>,
     exit_code: Arc<AtomicI32>,
 
@@ -265,6 +266,25 @@ impl Vmm {
     #[cfg(target_os = "macos")]
     pub fn resume_vcpus(&mut self) -> Result<()> {
         Ok(())
+    }
+
+    /// Save all vCPU states. Must call while vCPUs are paused.
+    pub fn save_vcpu_states(&self) -> Vec<vstate::VcpuState> {
+        use crossbeam_channel::unbounded;
+        let mut states = Vec::new();
+        for handle in self.vcpus_handles.iter() {
+            let (tx, rx) = unbounded();
+            handle.send_event(vstate::VcpuEvent::SaveState(tx)).expect("send SaveState event");
+            states.push(rx.recv_timeout(std::time::Duration::from_secs(5)).expect("recv VcpuState"));
+        }
+        states
+    }
+
+    /// Restore all vCPU states. Must call before resuming vCPUs.
+    pub fn restore_vcpu_states(&self, states: Vec<vstate::VcpuState>) {
+        for (handle, state) in self.vcpus_handles.iter().zip(states) {
+            handle.send_event(vstate::VcpuEvent::RestoreState(state)).expect("send RestoreState event");
+        }
     }
 
     /// Configures the system for boot.
@@ -342,6 +362,29 @@ impl Vmm {
     /// Returns a reference to the inner `GuestMemoryMmap` object if present, or `None` otherwise.
     pub fn guest_memory(&self) -> &GuestMemoryMmap {
         &self.guest_memory
+    }
+
+    /// Return guest memory memfd file descriptors for branch sharing.
+    #[doc(hidden)]
+    pub fn guest_memfd_fds(&self) -> Vec<RawFd> {
+        self.vm.guest_memfds.iter().map(|(_, fd)| *fd).collect()
+    }
+
+    #[doc(hidden)]
+    pub fn pause_and_wait(&self) {
+        for vcpu in self.vcpus_handles.iter() {
+            let _ = vcpu.send_event(crate::linux::vstate::VcpuEvent::Pause);
+        }
+        for vcpu in self.vcpus_handles.iter() {
+            let _ = vcpu.response_receiver().recv();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn resume_all(&self) {
+        for vcpu in self.vcpus_handles.iter() {
+            let _ = vcpu.send_event(crate::linux::vstate::VcpuEvent::Resume);
+        }
     }
 
     /// Injects CTRL+ALT+DEL keystroke combo in the i8042 device.
@@ -440,3 +483,4 @@ impl Subscriber for Vmm {
         )]
     }
 }
+

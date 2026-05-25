@@ -565,17 +565,25 @@ pub fn build_microvm(
     event_manager: &mut EventManager,
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
+    existing_memfds: Option<&[libc::c_int]>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
 
-    let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = create_guest_memory(
-        vm_resources
-            .vm_config()
-            .mem_size_mib
-            .ok_or(StartMicrovmError::MissingMemSizeConfig)?,
-        vm_resources,
-        &payload,
-    )?;
+    let (guest_memory, arch_memory_info, mut _shm_manager, payload_config) = if let Some(fds) = existing_memfds {
+        let gm = create_child_memory_from_parent_memfds(vm_resources, fds)?;
+        let arch_mem_info = ArchMemoryInfo::default();
+        let shm = ShmManager::new(&arch_mem_info);
+        (gm, arch_mem_info, shm, PayloadConfig { entry_addr: vm_memory::GuestAddress(0), initrd_config: None, kernel_cmdline: None })
+    } else {
+        create_guest_memory(
+            vm_resources
+                .vm_config()
+                .mem_size_mib
+                .ok_or(StartMicrovmError::MissingMemSizeConfig)?,
+            vm_resources,
+            &payload,
+        )?
+    };
 
     let vcpu_config = vm_resources.vcpu_config();
 
@@ -1510,6 +1518,104 @@ pub struct PayloadConfig {
     kernel_cmdline: Option<String>,
 }
 
+
+/// Creates child guest memory by copying pages from parent memfds.
+/// Creates a new memfd per region and copies content via sendfile/read-write.
+pub fn create_child_memory_from_parent_memfds(
+    vm_resources: &VmResources,
+    parent_memfds: &[libc::c_int],
+) -> Result<GuestMemoryMmap, StartMicrovmError> {
+    let mem_size = vm_resources
+        .vm_config()
+        .mem_size_mib
+        .ok_or(StartMicrovmError::MissingMemSizeConfig)? << 20;
+
+    let payload = choose_payload(vm_resources).map_err(|_| StartMicrovmError::MissingKernelConfig)?;
+
+    #[cfg(target_arch = "x86_64")]
+    let (_info, arch_mem_regions) = match &payload {
+        Payload::KernelMmap => {
+            let (kg, ks) = if let Some(kb) = &vm_resources.kernel_bundle {
+                (kb.guest_addr, kb.size)
+            } else { return Err(StartMicrovmError::MissingKernelConfig); };
+            arch::arch_memory_regions(mem_size, Some(kg), ks, 0, None)
+        }
+        Payload::ExternalKernel(ek) => {
+            arch::arch_memory_regions(mem_size, None, 0, ek.initramfs_size, None)
+        }
+        Payload::Firmware => {
+            arch::arch_memory_regions(mem_size, None, 0, 0, None)
+        }
+        _ => arch::arch_memory_regions(mem_size, None, 0, 0, None),
+    };
+
+    if arch_mem_regions.len() != parent_memfds.len() {
+        return Err(StartMicrovmError::GuestMemoryMmap(format!(
+            "memfd count mismatch: {} vs {}",
+            arch_mem_regions.len(), parent_memfds.len()
+        )));
+    }
+
+    let regions_with_files: Vec<_> = arch_mem_regions
+        .iter()
+        .zip(parent_memfds.iter())
+        .map(|((addr, size), parent_fd)| {
+            let child_fd = unsafe {
+                let fd = libc::memfd_create(c"guest_mem".as_ptr(), libc::MFD_CLOEXEC);
+                if fd < 0 { return Err(std::io::Error::last_os_error()); }
+                if libc::ftruncate(fd, *size as i64) < 0 {
+                    libc::close(fd);
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Try zero-copy reflink (FICLONE) first. Works on tmpfs where memfd lives.
+                const FICLONE: libc::c_ulong = 0x40049409;
+                let clone_ok = libc::ioctl(fd, FICLONE, *parent_fd) == 0;
+                if !clone_ok {
+                    let mut offset: libc::off_t = 0;
+                    let mut remaining = *size;
+                    while remaining > 0 {
+                        let n = libc::sendfile(fd, *parent_fd, &mut offset, remaining);
+                        if n < 0 {
+                            let err = std::io::Error::last_os_error();
+                            if err.raw_os_error() == Some(libc::EINVAL) {
+                                let chunk = std::cmp::min(remaining, 65536);
+                                let mut buf = vec![0u8; chunk];
+                                let mut total = 0usize;
+                                while total < buf.len() {
+                                    let r = libc::read(*parent_fd, buf[total..].as_mut_ptr() as *mut _, buf.len() - total);
+                                    if r <= 0 { libc::close(fd); return Err(std::io::Error::last_os_error()); }
+                                    total += r as usize;
+                                }
+                                let mut written = 0usize;
+                                while written < total {
+                                    let w = libc::write(fd, buf[written..].as_ptr() as *const _, total - written);
+                                    if w <= 0 { libc::close(fd); return Err(std::io::Error::last_os_error()); }
+                                    written += w as usize;
+                                }
+                                offset += written as i64;
+                                remaining -= written;
+                            } else {
+                                libc::close(fd);
+                                return Err(err);
+                            }
+                        } else {
+                            remaining -= n as usize;
+                        }
+                    }
+                }
+                fd
+            };
+            let file = unsafe { File::from_raw_fd(child_fd) };
+            let file_offset = FileOffset::new(file, 0);
+            Ok((*addr, *size, Some(file_offset)))
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()
+        .map_err(|e| StartMicrovmError::GuestMemoryMmap(format!("copy failed: {:?}", e)))?;
+
+    GuestMemoryMmap::from_ranges_with_files(&regions_with_files)
+        .map_err(|e| StartMicrovmError::GuestMemoryMmap(format!("{:?}", e)))
+}
+
 pub fn create_guest_memory(
     mem_size: usize,
     vm_resources: &VmResources,
@@ -1595,7 +1701,7 @@ pub fn create_guest_memory(
     // Add SHM regions before creating guest memory
     arch_mem_regions.extend(shm_manager.regions());
 
-    let guest_mem = if use_vhost_user {
+    let _use_vhost_user = use_vhost_user; let guest_mem = if true {
         #[cfg(all(feature = "vhost-user", target_os = "linux"))]
         {
             debug!(

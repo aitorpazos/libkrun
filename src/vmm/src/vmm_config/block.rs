@@ -42,7 +42,7 @@ pub struct BlockRootConfig {
     pub options: Option<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BlockBuilder {
     pub list: VecDeque<Arc<Mutex<Block>>>,
 }
