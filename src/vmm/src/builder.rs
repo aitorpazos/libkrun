@@ -95,7 +95,6 @@ use vm_memory::mmap::MmapRegion;
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
 use vm_memory::Address;
 use vm_memory::Bytes;
-#[cfg(all(feature = "vhost-user", target_os = "linux"))]
 use vm_memory::FileOffset;
 #[cfg(not(feature = "aws-nitro"))]
 use vm_memory::GuestMemory;
@@ -566,6 +565,8 @@ pub fn build_microvm(
     _shutdown_efd: Option<EventFd>,
     _sender: Sender<WorkerMessage>,
     existing_memfds: Option<&[libc::c_int]>,
+    child_vcpu_states: Option<Vec<crate::linux::vstate::VcpuState>>,
+    child_vm_state: Option<crate::linux::vstate::VmState>,
 ) -> std::result::Result<Arc<Mutex<Vmm>>, StartMicrovmError> {
     let payload = choose_payload(vm_resources)?;
 
@@ -1143,8 +1144,30 @@ pub fn build_microvm(
         println!("Starting TEE/microVM.");
     }
 
-    vmm.start_vcpus(vcpus)
-        .map_err(StartMicrovmError::Internal)?;
+    /* CH HOT-FORK: restore VM + vCPU states so child forks run from parent snapshot */
+    if let Some(vcpu_states) = child_vcpu_states {
+        vmm.restore_vcpu_states(vcpu_states);
+        info!("Restored vCPU states to child microVM");
+        /* VM state (PIT, PIC, IOAPIC, clock) is hardware-level and independent of guest memory.
+           On child start the KVM VM fd is freshly created, so restoring VM state is optional
+           but ensures interrupt controller state matches the snapshot. */
+        if let Some(vm_state) = child_vm_state {
+            if let Err(e) = vmm.vm.restore_state(&vm_state) {
+                warn!("Could not restore VM state to child: {:?}; continuing with fresh VM state", e);
+            } else {
+                info!("Restored VM state to child microVM");
+            }
+        }
+        /* When vCPU states are restored, the vCPUs receive RestoreState events;
+           they acknowledge but remain in Paused state until resumed */
+        if let Err(e) = vmm.resume_vcpus() {
+            error!("Failed to resume child vCPUs after state restore: {:?}", e);
+            return Err(StartMicrovmError::Internal(e));
+        }
+    } else {
+        vmm.start_vcpus(vcpus)
+            .map_err(StartMicrovmError::Internal)?;
+    }
 
     // Clippy thinks we don't need Arc<Mutex<...
     // but we don't want to change the event_manager interface

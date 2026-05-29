@@ -2665,8 +2665,8 @@ pub extern "C" fn krun_branch_ctx(parent_ctx_id: u32) -> i32 {
         let vmm_lock = parent_vmm.lock().unwrap();
         let vcpu_states: Vec<vmm::linux::vstate::VcpuState> = vmm_lock.save_vcpu_states();
         let vm_state: vmm::linux::vstate::VmState = vmm_lock.vm.save_state().expect("save VM state");
-        live_vmms::store_vcpu_states(parent_ctx_id, vcpu_states);
-        live_vmms::store_vm_state(parent_ctx_id, vm_state);
+        live_vmms::store_vcpu_states(parent_ctx_id, vcpu_states.clone());
+        live_vmms::store_vm_state(parent_ctx_id, vm_state.clone());
         info!("Saved parent VM state for hot-fork");
     }
 
@@ -2693,6 +2693,15 @@ pub extern "C" fn krun_branch_ctx(parent_ctx_id: u32) -> i32 {
         let mut child_cfg = ContextConfig::default();
         child_cfg.vmr = vmr;
         CTX_MAP.lock().unwrap().insert(child_id, child_cfg);
+    }
+
+    /* CH HOT-FORK: store child states keyed by child_id for lookup after fork() */
+    {
+        let vmm_lock = parent_vmm.lock().unwrap();
+        let vcpu_states: Vec<vmm::linux::vstate::VcpuState> = vmm_lock.save_vcpu_states();
+        let vm_state: vmm::linux::vstate::VmState = vmm_lock.vm.save_state().expect("save VM state");
+        live_vmms::store_vcpu_states(child_id, vcpu_states);
+        live_vmms::store_vm_state(child_id, vm_state);
     }
 
     live_vmms::store_memfds(child_id, child_memfds);
@@ -2869,6 +2878,10 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
 
     let (sender, _receiver) = unbounded();
 
+    /* CH HOT-FORK: restore saved vcpu/vm states for child contexts */
+    let child_vcpu_states = live_vmms::get_vcpu_states(ctx_id);
+    let child_vm_state      = live_vmms::get_vm_state(ctx_id);
+
     let parent_memfds = live_vmms::get_memfds(ctx_id);
 
     let _vmm = match vmm::builder::build_microvm(
@@ -2877,6 +2890,8 @@ pub extern "C" fn krun_start_enter(ctx_id: u32) -> i32 {
         ctx_cfg.shutdown_efd,
         sender,
         parent_memfds.as_deref(),
+        child_vcpu_states,
+        child_vm_state,
     ) {
         Ok(vmm) => vmm,
         Err(e) => {
