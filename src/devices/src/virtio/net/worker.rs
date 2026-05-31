@@ -55,7 +55,7 @@ impl NetWorker {
             VirtioNetBackend::UnixstreamPath(path) => {
                 Box::new(Unixstream::open(path)?) as Box<dyn NetBackend + Send>
             }
-            VirtioNetBackend::UnixgramFd(fd) => {
+            VirtioNetBackend::UnixgramFd(fd, _vfkit_magic) => {
                 // SAFETY: we need to trust that the library user has configured
                 // the backend with a healthy file descriptor.
                 let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };

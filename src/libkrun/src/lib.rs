@@ -1050,7 +1050,7 @@ pub unsafe extern "C" fn krun_add_net_unixgram(
     let backend = if let Some(path) = path {
         VirtioNetBackend::UnixgramPath(path, send_vfkit_magic)
     } else {
-        VirtioNetBackend::UnixgramFd(fd)
+        VirtioNetBackend::UnixgramFd(fd, false)
     };
 
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
@@ -2692,6 +2692,42 @@ pub extern "C" fn krun_branch_ctx(parent_ctx_id: u32) -> i32 {
         };
         let mut child_cfg = ContextConfig::default();
         child_cfg.vmr = vmr;
+        // Copy parent's execution config so child VM has exec_path, args, env, rlimits, etc.
+        {
+            let ctx_map = CTX_MAP.lock().unwrap();
+            if let Some(parent_cfg) = ctx_map.get(&parent_ctx_id) {
+                child_cfg.exec_path  = parent_cfg.exec_path.clone();
+                child_cfg.args       = parent_cfg.args.clone();
+                child_cfg.env        = parent_cfg.env.clone();
+                child_cfg.rlimits    = parent_cfg.rlimits.clone();
+                child_cfg.workdir    = parent_cfg.workdir.clone();
+                child_cfg.vmm_uid    = parent_cfg.vmm_uid;
+                child_cfg.vmm_gid    = parent_cfg.vmm_gid;
+                child_cfg.console_output = parent_cfg.console_output.clone();
+                #[cfg(feature = "net")]
+                {
+                    child_cfg.legacy_net_cfg = parent_cfg.legacy_net_cfg.clone();
+                    child_cfg.legacy_mac     = parent_cfg.legacy_mac;
+                }
+                child_cfg.net_index  = parent_cfg.net_index;
+                child_cfg.vsock_config = parent_cfg.vsock_config.clone();
+                child_cfg.tsi_port_map = parent_cfg.tsi_port_map.clone();
+                child_cfg.unix_ipc_port_map = parent_cfg.unix_ipc_port_map.clone();
+                child_cfg.gpu_virgl_flags = parent_cfg.gpu_virgl_flags;
+                child_cfg.gpu_shm_size    = parent_cfg.gpu_shm_size;
+                #[cfg(feature = "blk")]
+                {
+                    child_cfg.block_cfgs    = parent_cfg.block_cfgs.clone();
+                    child_cfg.root_block_cfg = parent_cfg.root_block_cfg.clone();
+                    child_cfg.data_block_cfg = parent_cfg.data_block_cfg.clone();
+                    child_cfg.block_root     = parent_cfg.block_root.clone();
+                }
+                #[cfg(feature = "tee")]
+                {
+                    child_cfg.tee_config_file = parent_cfg.tee_config_file.clone();
+                }
+            }
+        }
         CTX_MAP.lock().unwrap().insert(child_id, child_cfg);
     }
 

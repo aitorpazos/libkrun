@@ -63,7 +63,7 @@ unsafe impl ByteValued for VirtioNetConfig {}
 pub enum VirtioNetBackend {
     UnixstreamFd(RawFd),
     UnixstreamPath(PathBuf),
-    UnixgramFd(RawFd),
+    UnixgramFd(RawFd, bool),
     UnixgramPath(PathBuf, bool),
     #[cfg(target_os = "linux")]
     Tap(String),
